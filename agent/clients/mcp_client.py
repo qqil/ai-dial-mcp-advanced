@@ -1,7 +1,7 @@
 from typing import Optional, Any
 
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamablehttp_client, streamable_http_client
 from mcp.types import CallToolResult, TextContent
 
 
@@ -23,11 +23,11 @@ class MCPClient:
 
     async def connect(self):
         """Connect to MCP server"""
-        self._streams_context = streamablehttp_client(self.server_url)
+        self._streams_context = streamable_http_client(self.server_url)
         read_stream, write_stream, _ = await self._streams_context.__aenter__()
 
         self._session_context = ClientSession(read_stream, write_stream)
-        self.session: ClientSession = await self._session_context.__aenter__()
+        self.session = await self._session_context.__aenter__()
 
         init_result = await self.session.initialize()
         print(init_result.model_dump_json(indent=2))

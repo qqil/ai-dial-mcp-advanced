@@ -5,8 +5,8 @@ from fastapi.responses import StreamingResponse
 import uvicorn
 
 from mcp_server.services.mcp_server import MCPServer
-from models.request import MCPRequest
-from models.response import MCPResponse, ErrorResponse
+from mcp_server.models.request import MCPRequest
+from mcp_server.models.response import MCPResponse, ErrorResponse
 
 MCP_SESSION_ID_HEADER = "Mcp-Session-Id"
 
@@ -23,7 +23,14 @@ def _validate_accept_header(accept_header: Optional[str]) -> bool:
     # 3. Check if any type in `accept_types` contains 'application/json' and assign to `has_json`
     # 4. Check if any type in `accept_types` contains 'text/event-stream' and assign to `has_sse`
     # 5. Return `has_json and has_sse`
-    raise NotImplementedError()
+    if not accept_header or accept_header.strip() == "" or accept_header == None:
+        return False
+    
+    accept_types = [a.strip().lower() for a in accept_header.split(",")]
+    has_json = any("application/json" in a for a in accept_types)
+    has_sse = any("text/event-stream" in a for a in accept_types)
+
+    return has_json and has_sse
 
 async def _create_sse_stream(messages: list):
     """Create Server-Sent Events stream for responses"""
@@ -32,7 +39,10 @@ async def _create_sse_stream(messages: list):
     # 2. For each message, create `event_data` string in format: f"data: {json.dumps(message.dict(exclude_none=True))}\n\n"
     # 3. Yield `event_data.encode('utf-8')`
     # 4. After loop, yield final message: b"data: [DONE]\n\n" (indicator that the streaming is finished)
-    raise NotImplementedError()
+    for message in messages:
+        event_data = f"data: {json.dumps(message.dict(exclude_none=True))}\n\n"
+        yield event_data.encode('utf-8')
+    yield b"data: [DONE]\n\n"
 
 @app.post("/mcp")
 async def handle_mcp_request(
@@ -81,12 +91,91 @@ async def handle_mcp_request(
     #       - content=_create_sse_stream([mcp_response])
     #       - media_type="text/event-stream"
     #       - headers={"Cache-Control": "no-cache", "Connection": "keep-alive", MCP_SESSION_ID_HEADER: mcp_session_id}
-    raise NotImplementedError()
+    if not _validate_accept_header(accept):
+        error_response = MCPResponse(
+            id="server-error",
+            error=ErrorResponse(code=-32600, message="Client must accept both application/json and text/event-stream")
+        )
+        return Response(
+            status_code=406,
+            content=error_response.model_dump_json(),
+            media_type="application/json"
+        )
 
+    if request.method == "initialize":
+        mcp_response, session_id = mcp_server.handle_initialize(request)
+        if session_id:
+            response.headers[MCP_SESSION_ID_HEADER] = session_id
+            mcp_session_id = session_id
+        else:
+            error_response = MCPResponse(
+                id="server-error",
+                error=ErrorResponse(code=-32603, message="Failed to initialize session")
+            )
+            return Response(
+                status_code=500,
+                content=error_response.model_dump_json(),
+                media_type="application/json"
+            )
+    else:
+        if not mcp_session_id:
+            error_response = MCPResponse(
+                id="server-error",
+                error=ErrorResponse(code=-32600, message="Missing session ID")
+            )
+            return Response(
+                status_code=400,
+                content=error_response.model_dump_json(),
+                media_type="application/json"
+            )
+
+        session = mcp_server.get_session(mcp_session_id)
+        if not session:
+            return Response(
+                status_code=400,
+                content="No valid session ID provided",
+                media_type="text/plain"
+            )
+
+        if request.method == "notifications/initialized":
+            session.ready_for_operation = True
+            return Response(status_code=202, headers={MCP_SESSION_ID_HEADER: session.session_id})
+
+        if not session.ready_for_operation:
+            error_response = MCPResponse(
+                id="server-error",
+                error=ErrorResponse(code=-32600, message="Session not ready for operations")
+            )
+            return Response(
+                status_code=400,
+                content=error_response.model_dump_json(),
+                media_type="application/json"
+            )
+
+        if request.method == "tools/list":
+            mcp_response = mcp_server.handle_tools_list(request)
+        elif request.method == "tools/call":
+            mcp_response = await mcp_server.handle_tools_call(request)
+        else:
+            mcp_response = MCPResponse(
+                id=request.id,
+                error=ErrorResponse(code=-32602, message=f"Method '{request.method}' not found")
+            )
+
+
+    return StreamingResponse(
+        content=_create_sse_stream([mcp_response]),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache", 
+            "Connection": "keep-alive", 
+            MCP_SESSION_ID_HEADER: mcp_session_id
+        }
+    )
 
 if __name__ == "__main__":
     uvicorn.run(
-        "server:app",
+        "mcp_server.server:app",
         host="0.0.0.0",
         port=8006,
         reload=True,

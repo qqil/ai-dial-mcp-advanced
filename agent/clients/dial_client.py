@@ -90,6 +90,9 @@ class DialClient:
 
     async def _call_tools(self, ai_message: Message, messages: list[Message]):
         """Execute tool calls using MCP client"""
+        if not ai_message.tool_calls:
+            return
+
         for tool_call in ai_message.tool_calls:
             tool_name = tool_call["function"]["name"]
             tool_args = json.loads(tool_call["function"]["arguments"])
